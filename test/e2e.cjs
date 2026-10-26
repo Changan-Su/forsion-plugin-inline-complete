@@ -4,10 +4,10 @@
 //
 // Run from the Forsion root, under the GUI lock:
 //   node .claude/hooks/devlock.cjs run --vehicle=e2e --what="行内补全插件验证" --eta=4 -- node <plugin>/test/e2e.cjs
-// GENESIS_DESKTOP = a built desktop checkout (default: the ghost-completion-shots worktree).
+// GENESIS_DESKTOP = a built desktop checkout (default: <Forsion root>/Forsion-Genesis/desktop; FIM=1 needs a build with ctx.tangu.fim).
 // SHOT = where to save the screenshot (default: <plugin>/test/.out/ghost.png).
 const fs = require('fs'); const os = require('os'); const path = require('path')
-const DESK = process.env.GENESIS_DESKTOP || '/Users/suqingyuan/Documents/Project/Forsion/.worktrees/ghost-completion-shots/desktop'
+const DESK = process.env.GENESIS_DESKTOP || path.resolve(__dirname, '../../../Forsion-Genesis/desktop')
 const electron = require(path.join(DESK, 'scripts/lib/launch-electron.cjs'))
 const { startStubEngine } = require(path.join(DESK, 'scripts/lib/stub-engine.cjs'))
 const { skipOnboarding } = require(path.join(DESK, 'scripts/lib/skip-onboarding.cjs'))
