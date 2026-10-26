@@ -128,15 +128,18 @@ function icTouch() {
 // instruction for the rest of the session when fim is missing or says fim_unavailable.
 var icFimOff = false
 function icCanSuggest() { return !!(ctx.tangu && (typeof ctx.tangu.fim === 'function' || typeof ctx.tangu.complete === 'function')) }
-function icCallModel(c, signal, onDelta) {
+function icCallModel(c, signal, onDelta, onReset) {
   var tg = ctx.tangu
   if (!icFimOff && tg && typeof tg.fim === 'function') {
     var fr = IC_CORE.FIM_REQ[c.strength]
-    var gotDelta = false
-    return tg.fim({ before: c.before, after: c.after || undefined, maxTokens: fr.maxTokens, stop: fr.stop, signal: signal, onDelta: function (d) { gotDelta = true; onDelta(d, true) } })
+    return tg.fim({ before: c.before, after: c.after || undefined, maxTokens: fr.maxTokens, stop: fr.stop, signal: signal, onDelta: function (d) { onDelta(d, true) } })
       .then(function (r) { return { text: String((r && r.text) || ''), raw: true } }, function (e) {
-        if (e && e.message === 'fim_unavailable' && !gotDelta && !(signal && signal.aborted)) {
+        // fim_unavailable = no completion model / the engine cannot do FIM: use complete for the rest of the
+        // session, whatever already streamed. Anything else (fim_catalog_unreachable, network) stays transient.
+        if (e && e.message === 'fim_unavailable') {
           icFimOff = true
+          if (signal && signal.aborted) throw e
+          if (onReset) onReset()
           return icViaComplete(c, signal, onDelta)
         }
         throw e
@@ -181,7 +184,7 @@ function icSuggest(c, ac) {
       raw = isRaw
       var r = shape(buf, raw, false)
       if (r.done) { finish(r.text); ac.abort() }
-    }).then(function (res) {
+    }, function () { buf = ''; raw = false }).then(function (res) {
       // Finished on its own: the chat fallback's final text is trimmed and fence-stripped; FIM's is raw.
       var text = res.raw ? (buf || res.text) : (res.text || buf)
       finish(shape(text, res.raw, true).text)
@@ -254,23 +257,38 @@ if (typeof ctx.registerEditorExtension === 'function') {
       if (ctl.timer) { clearTimeout(ctl.timer); ctl.timer = 0 }
       if (ctl.ac) { var a = ctl.ac; ctl.ac = null; a.abort() }
     }
-    function visible(g) { return !!(g && !g.hidden && g.full.length > g.typed) }
+    function visible(g) { return !!(icSettings.enabled && g && !g.hidden && g.full.length > g.typed) }
 
-    // Re-derive the ghost after a change. Alive only while the caret is still at the end of the same
-    // block and everything typed since the ghost appeared is a prefix of it (type-through).
+    // Re-derive the ghost after a change. It survives only verified type-through: text inserted exactly at
+    // the caret, nothing removed, everything typed since it appeared a prefix of it, caret still at the end
+    // of the same block. While an input method composes it hides; edits must then stay at or after the caret.
     function recheck(g, tr, state, composing) {
       try {
-        var anchor = tr.docChanged ? tr.mapping.map(g.anchor, -1) : g.anchor
-        if (composing) return { anchor: anchor, full: g.full, typed: g.typed, id: g.id, fresh: false, hidden: true }
+        var end = g.anchor + g.typed // the caret end, in the coordinates before this transaction
+        if (tr.docChanged) {
+          var ok = true
+          var hidden = composing || g.hidden
+          tr.mapping.maps.forEach(function (m) {
+            m.forEach(function (oldStart, oldEnd, newStart, newEnd) {
+              if (!ok) return
+              if (hidden) { if (oldStart < end) ok = false; return }
+              if (oldEnd > oldStart || oldStart !== end) ok = false
+              else end += newEnd - newStart
+            })
+          })
+          if (!ok) return null
+        }
+        if (composing) return { anchor: g.anchor, full: g.full, typed: g.typed, id: g.id, fresh: false, hidden: true }
         var sel = state.selection
         if (!sel.empty) return null
         var $h = sel.$head
         if (!$h.parent.isTextblock || $h.parentOffset !== $h.parent.content.size) return null
-        if (sel.head < anchor || anchor < $h.start()) return null
-        var typed = state.doc.textBetween(anchor, sel.head, '\n', ' ')
+        if (sel.head < g.anchor || g.anchor < $h.start()) return null
+        if (!g.hidden && sel.head !== end) return null
+        var typed = state.doc.textBetween(g.anchor, sel.head, '\n', ' ')
         var rest = IC_CORE.typeThrough(g.full, typed)
         if (!rest || typed.length < g.typed) return null // typed it all, mismatch, or deleted
-        return { anchor: anchor, full: g.full, typed: typed.length, id: g.id, fresh: g.fresh && typed.length === g.typed, hidden: false }
+        return { anchor: g.anchor, full: g.full, typed: typed.length, id: g.id, fresh: g.fresh && typed.length === g.typed, hidden: false }
       } catch (e) {
         return null
       }
@@ -378,6 +396,7 @@ if (typeof ctx.registerEditorExtension === 'function') {
         handleDOMEvents: {
           blur: function (view) { cancelPending(); if (key.getState(view.state)) dismiss(view); return false },
           compositionstart: function (view) {
+            cancelPending()
             var g = key.getState(view.state)
             if (visible(g)) view.dispatch(view.state.tr.setMeta(key, { anchor: g.anchor, full: g.full, typed: g.typed, id: g.id, fresh: false, hidden: true }))
             return false
@@ -400,6 +419,13 @@ if (typeof ctx.registerEditorExtension === 'function') {
       },
       view: function (v) {
         ctl.view = v
+        // Turned off (command / settings): stop waiting and take the ghost away at once.
+        var onSettings = function () {
+          if (icSettings.enabled || ctl.view !== v) return
+          cancelPending()
+          if (key.getState(v.state)) v.dispatch(v.state.tr.setMeta(key, null))
+        }
+        icSettingsListeners.push(onSettings)
         return {
           update: function (view, prev) {
             var docChanged = view.state.doc !== prev.doc
@@ -409,7 +435,11 @@ if (typeof ctx.registerEditorExtension === 'function') {
             if (visible(key.getState(view.state))) return // type-through: keep the ghost, ask nothing
             if (docChanged && view.hasFocus()) schedule(view)
           },
-          destroy: function () { cancelPending(); ctl.view = null },
+          destroy: function () {
+            cancelPending()
+            ctl.view = null
+            icSettingsListeners = icSettingsListeners.filter(function (f) { return f !== onSettings })
+          },
         }
       },
     })]

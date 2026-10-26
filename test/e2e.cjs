@@ -14,6 +14,9 @@ const { skipOnboarding } = require(path.join(DESK, 'scripts/lib/skip-onboarding.
 const ROOT = path.join(__dirname, '..')
 const OUT = path.join(__dirname, '.out'); fs.mkdirSync(OUT, { recursive: true })
 const SHOT = process.env.SHOT || path.join(OUT, 'ghost.png')
+// FIM=1: the stub offers a completion model (catalog fimModels) and answers action 'fim' — for a host with ctx.tangu.fim.
+const FIM = process.env.FIM === '1'
+const ACTION = FIM ? 'fim' : 'custom'
 
 // Test data lives here only (the plugin itself ships empty).
 const NOTE = '周会纪要.md'
@@ -55,11 +58,12 @@ async function main() {
   const sse = (frames) => ({ __buffer: Buffer.from(frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join('')), contentType: 'text/event-stream' })
   const stub = await startStubEngine({
     models: [{ id: 'gpt-6-luna', name: 'GPT-6 Luna', provider: 'stub', source: 'forsion' }],
+    ...(FIM ? { modelsMeta: { fimModels: [{ id: 'codestral', name: 'Codestral', provider: 'stub', apiModelId: 'codestral-latest' }] } } : {}),
     override: async ({ path: p, method, body }) => {
       if (p !== '/agent/inline' || method !== 'POST') return undefined
       const b = await body()
       inline.push(b)
-      if (b.action === 'fim') return sse([{ type: 'error', error: 'fim_unsupported' }])
+      if (b.action === 'fim' && !FIM) return sse([{ type: 'error', error: 'fim_unsupported' }])
       if (mode === 'slow') { await new Promise((r) => setTimeout(r, 3600)); return sse([{ type: 'done', content: '太晚了', modelId: 'gpt-6-luna' }]) }
       await new Promise((r) => setTimeout(r, 150))
       const deltas = ANSWER.match(/.{1,6}/g).map((text) => ({ type: 'delta', text }))
@@ -104,7 +108,8 @@ async function main() {
     check('medium cuts at the end of the sentence', g1 === SENTENCE)
     check('keycap says Tab', (await win.locator('[data-inline-complete] .ic-kbd').textContent().catch(() => '')) === 'Tab')
     const req = inline[0] || {}
-    check('one request, with section context', inline.length === 1 && req.action === 'custom' && /## 下周安排/.test(req.before || '') && /下周三之前把今天$/.test(req.before || '') && !/本周进展/.test(req.before || ''), JSON.stringify({ n: inline.length, action: req.action, before: req.before }))
+    if (FIM) check('fim request shape', req.model_id === 'codestral' && req.max_tokens === 64 && JSON.stringify(req.stop) === '["\\n"]' && !('instruction' in req), JSON.stringify({ model_id: req.model_id, max_tokens: req.max_tokens, stop: req.stop, after: req.after }))
+    check('one request, with section context', inline.length === 1 && req.action === ACTION && /## 下周安排/.test(req.before || '') && /下周三之前把今天$/.test(req.before || '') && !/本周进展/.test(req.before || ''), JSON.stringify({ n: inline.length, action: req.action, before: req.before }))
     const color = await ghost.evaluate((el) => { const s = getComputedStyle(el); return { color: s.color, ghost: getComputedStyle(document.documentElement).getPropertyValue('--text-ghost').trim() } })
     check('ghost uses --text-ghost', !!color.ghost, JSON.stringify(color))
     await win.mouse.move(1400, 900); await win.waitForTimeout(250)
@@ -151,6 +156,13 @@ async function main() {
     await win.waitForTimeout(100)
     check('mismatched typing kills the ghost', (await ghost.count()) === 0)
     await win.keyboard.press('Backspace')
+    await ghost.waitFor({ timeout: 4000 }).catch(() => {})
+    // deleting before the caret kills the ghost (it must not survive to be accepted with Tab)
+    check('ghost back after the pause', (await ghost.count()) === 1)
+    await win.keyboard.press('Backspace')
+    await win.waitForTimeout(80)
+    check('Backspace kills the ghost', (await ghost.count()) === 0)
+    await win.keyboard.type('外')
     await ghost.waitFor({ timeout: 4000 }).catch(() => {})
     await win.keyboard.press('Escape')
 
@@ -229,6 +241,7 @@ async function main() {
     await app.close().catch(() => {}); stub.close?.()
     try { fs.rmSync(home, { recursive: true, force: true }) } catch { /* temp */ }
   }
+  if (FIM) check('never fell back to complete', inline.length > 0 && inline.every((b) => b.action === 'fim'), inline.map((b) => b.action).join(','))
   const bad = checks.filter((c) => !c.ok)
   console.log(`\n${checks.length - bad.length}/${checks.length} checks passed; screenshot ${SHOT}`)
   process.exit(bad.length ? 1 : 0)
