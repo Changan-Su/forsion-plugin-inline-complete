@@ -1,0 +1,11 @@
+{
+  "id": "inline-complete",
+  "name": "行内补全",
+  "nameEn": "Inline completion",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "minAppVersion": "2.13.0",
+  "main": "main.js",
+  "description": "像写代码时的 Copilot 一样续写笔记：打字停下来，光标后面出现一段灰色的续写，按 Tab 收进正文，⌘→ / Ctrl+→ 收一个词（中文按词切），Esc 不要。接着打的字和灰字一样就吃掉一截，不重新问模型。只在段尾出现，代码块、公式、表格、标题里不出，输入法拼字时不出。长度三档：短（补完这个词和一小段）、中（到这一句结束，缺省）、长（到这一段结束）。手机上键帽换成可点的「采用」。优先用「设置 → 模型 → 补全」里的补全模型，没有时用聊天模型。",
+  "descriptionEn": "Copilot-style completion for your notes: pause while typing and a grey continuation appears after the caret. Tab accepts it, ⌘→ / Ctrl+→ accepts one word (Chinese is split by words), Esc dismisses it. Keep typing the same text and the suggestion shrinks instead of asking the model again. It only appears at the end of a paragraph — never in code blocks, math, tables or headings, and never while an input method is composing. Three lengths: short (finish the word and a short phrase), medium (to the end of the sentence, the default) and long (to the end of the paragraph). On phones the keycap becomes a tappable Accept button. Uses the completion model from Settings → Models → Completion when there is one, otherwise the chat model."
+}

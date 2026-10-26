@@ -1,0 +1,511 @@
+// Inline completion (行内补全): IDE-style ghost text after the caret in Amadeus notes.
+// Display B of docs/ToBeImproved/行内补全显示方案_2026-10-20: grey continuation + a trailing `Tab` keycap
+// (on touch devices a tappable "Accept" pill). This file is the setup body; IC_CORE comes from src/core.js.
+
+// ── i18n ──────────────────────────────────────────────────────────────────────────────────────
+var IC_MSG = {
+  zh: {
+    'kbd.accept': '采用',
+    'cmd.toggle': '开关行内补全',
+    'cmd.cycle': '行内补全：切换长度',
+    'toast.on': '行内补全已打开',
+    'toast.off': '行内补全已关闭',
+    'toast.strength': '行内补全长度：{name}',
+    'strength.short': '短',
+    'strength.medium': '中',
+    'strength.long': '长',
+    'strength.short.detail': '补完这个词和后面一小段，到标点为止',
+    'strength.medium.detail': '写到这一句结束',
+    'strength.long.detail': '写到这一段结束，可能折成多行',
+    'set.group': '行内补全',
+    'set.groupDesc': '停下来时在光标后给出灰色的续写，按 Tab 采用，⌘→ / Ctrl+→ 采用一个词，Esc 不要。只在段尾出现，代码块、公式、表格和标题里不出。',
+    'set.enabled': '打开行内补全',
+    'set.strength': '长度',
+    'set.strengthDesc': '越长越费额度，等得也越久。',
+    'set.pause': '停顿多久后给建议',
+    'set.pauseDesc': '「跟随长度」：短 0.3 秒、中 0.5 秒、长 1 秒。',
+    'pause.auto': '跟随长度',
+    'pause.300': '0.3 秒',
+    'pause.500': '0.5 秒',
+    'pause.1000': '1 秒',
+    'set.modelDesc': '在「设置 → 模型 → 补全」里选；没选时用聊天当前的模型。建议选一个快的小模型。',
+    'set.unavailable': '这个宿主没有 Tangu 的补全能力，行内补全不会工作。',
+  },
+  en: {
+    'kbd.accept': 'Accept',
+    'cmd.toggle': 'Toggle inline completion',
+    'cmd.cycle': 'Inline completion: cycle length',
+    'toast.on': 'Inline completion is on',
+    'toast.off': 'Inline completion is off',
+    'toast.strength': 'Inline completion length: {name}',
+    'strength.short': 'Short',
+    'strength.medium': 'Medium',
+    'strength.long': 'Long',
+    'strength.short.detail': 'Finish the word and a short phrase, up to the next punctuation mark',
+    'strength.medium.detail': 'Up to the end of the sentence',
+    'strength.long.detail': 'Up to the end of the paragraph; may wrap onto several lines',
+    'set.group': 'Inline completion',
+    'set.groupDesc': 'When you pause, a grey continuation appears after the caret. Tab accepts it, ⌘→ / Ctrl+→ accepts one word, Esc dismisses it. It only appears at the end of a paragraph, never in code blocks, math, tables or headings.',
+    'set.enabled': 'Turn on inline completion',
+    'set.strength': 'Length',
+    'set.strengthDesc': 'Longer suggestions cost more and take longer to arrive.',
+    'set.pause': 'Pause before suggesting',
+    'set.pauseDesc': '"Follow length": 0.3 s for short, 0.5 s for medium, 1 s for long.',
+    'pause.auto': 'Follow length',
+    'pause.300': '0.3 s',
+    'pause.500': '0.5 s',
+    'pause.1000': '1 s',
+    'set.modelDesc': 'Pick one in Settings → Models → Completion; without one, the current chat model is used. A small, fast model works best.',
+    'set.unavailable': 'This host has no Tangu completion, so inline completion will not work here.',
+  },
+}
+function icLocale() { return (ctx.getLocale ? ctx.getLocale() : 'zh') === 'en' ? 'en' : 'zh' }
+var icT = (ctx.i18n && typeof ctx.i18n.define === 'function')
+  ? ctx.i18n.define(IC_MSG)
+  : function (key, vars) {
+    var s = IC_MSG[icLocale()][key]
+    if (s === undefined) s = IC_MSG.zh[key]
+    if (s === undefined) s = key
+    if (vars) s = s.replace(/\{(\w+)\}/g, function (m, k) { return vars[k] === undefined ? m : String(vars[k]) })
+    return s
+  }
+
+// ── Settings (kept in ctx.loadData / saveData) ────────────────────────────────────────────────
+// Not registerSetting: it has no choice type (length is one of three), and its localStorage key
+// is built from the effective plugin id, which a plugin cannot read (store installs differ).
+var icSettings = { enabled: true, strength: 'medium', pause: 'auto' }
+var icSettingsListeners = []
+function icApplySettings(v) {
+  if (!v || typeof v !== 'object') return
+  if (typeof v.enabled === 'boolean') icSettings.enabled = v.enabled
+  if (IC_CORE.STRENGTHS.indexOf(v.strength) >= 0) icSettings.strength = v.strength
+  if (v.pause === 'auto' || IC_CORE.PAUSES.indexOf(Number(v.pause)) >= 0) icSettings.pause = v.pause === 'auto' ? 'auto' : String(Number(v.pause))
+}
+function icSaveSettings(patch) {
+  icApplySettings(patch)
+  try { if (ctx.saveData) ctx.saveData({ enabled: icSettings.enabled, strength: icSettings.strength, pause: icSettings.pause }) } catch (e) { /* host without storage */ }
+  icSettingsListeners.forEach(function (f) { try { f() } catch (e) { /* listener */ } })
+}
+if (ctx.loadData) {
+  Promise.resolve().then(function () { return ctx.loadData() }).then(function (v) { icApplySettings(v); icSettingsListeners.forEach(function (f) { try { f() } catch (e) { /* listener */ } }) }, function () {})
+}
+function icPauseMs() { return IC_CORE.pauseFor(icSettings.strength, icSettings.pause) }
+
+// ── Styles ────────────────────────────────────────────────────────────────────────────────────
+var IC_CSS = [
+  '.ic-wrap { white-space: pre-wrap; user-select: none; -webkit-user-select: none; }',
+  '.ic-ghost { color: var(--text-ghost, var(--text-faint)); }',
+  '.ic-fresh { animation: ic-in 120ms ease-out; }',
+  '@keyframes ic-in { from { opacity: 0 } to { opacity: 1 } }',
+  '@media (prefers-reduced-motion: reduce) { .ic-fresh { animation: none } }',
+  // The keycap is derived from the new tab page's .nt-kbd (same fill, size, radius).
+  '.ic-kbd { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: var(--radius-sm); background: var(--overlay-light); color: var(--text-muted); font: 500 var(--ui-font-caption, 11px)/18px var(--font-ui); vertical-align: 1px; white-space: nowrap; text-indent: 0; }',
+  // Touch: a tappable pill in the keycap's place; the touch area reaches 32px while the pill stays small.
+  '.ic-kbd.ic-tap { position: relative; padding: 0 8px; border-radius: var(--radius-pill); color: var(--text); background: var(--overlay-medium); line-height: 22px; cursor: pointer; }',
+  '.ic-kbd.ic-tap::before { content: ""; position: absolute; inset: -5px -4px; }',
+  '.ic-touch { cursor: pointer; }',
+].join('\n')
+var icStyle = null
+if (typeof ctx.addStyle === 'function') icStyle = ctx.addStyle(IC_CSS)
+else if (typeof document !== 'undefined') {
+  var icOld = document.getElementById('inline-complete-css')
+  if (icOld && icOld.remove) icOld.remove()
+  var icEl = document.createElement('style')
+  icEl.id = 'inline-complete-css'
+  icEl.textContent = IC_CSS
+  document.head.appendChild(icEl)
+}
+
+function icTouch() {
+  try {
+    if (typeof window !== 'undefined' && window.tangu && window.tangu.mobile) return true
+    return typeof matchMedia === 'function' && matchMedia('(hover: none), (pointer: coarse)').matches
+  } catch (e) { return false }
+}
+
+// ── Model call ────────────────────────────────────────────────────────────────────────────────
+// Prefer ctx.tangu.fim (completion-only models, raw text). Fall back to ctx.tangu.complete with an
+// instruction for the rest of the session when fim is missing or says fim_unavailable.
+var icFimOff = false
+function icCanSuggest() { return !!(ctx.tangu && (typeof ctx.tangu.fim === 'function' || typeof ctx.tangu.complete === 'function')) }
+function icCallModel(c, signal, onDelta) {
+  var tg = ctx.tangu
+  if (!icFimOff && tg && typeof tg.fim === 'function') {
+    var fr = IC_CORE.FIM_REQ[c.strength]
+    var gotDelta = false
+    return tg.fim({ before: c.before, after: c.after || undefined, maxTokens: fr.maxTokens, stop: fr.stop, signal: signal, onDelta: function (d) { gotDelta = true; onDelta(d, true) } })
+      .then(function (r) { return { text: String((r && r.text) || ''), raw: true } }, function (e) {
+        if (e && e.message === 'fim_unavailable' && !gotDelta && !(signal && signal.aborted)) {
+          icFimOff = true
+          return icViaComplete(c, signal, onDelta)
+        }
+        throw e
+      })
+  }
+  return icViaComplete(c, signal, onDelta)
+}
+function icViaComplete(c, signal, onDelta) {
+  var tg = ctx.tangu
+  if (!tg || typeof tg.complete !== 'function') return Promise.reject(new Error('no completion on this host'))
+  return tg.complete({ prompt: IC_CORE.promptFor(c.strength), before: c.before, after: c.after || undefined, signal: signal, onDelta: function (d) { onDelta(d, false) } })
+    .then(function (r) { return { text: String((r && r.text) || ''), raw: false } })
+}
+
+/** One suggestion: streams, cuts to length (aborting once there is enough), gives up after 3 s.
+ *  Resolves with the text to show ('' = nothing). Never rejects. */
+function icSuggest(c, ac) {
+  return new Promise(function (resolve) {
+    var buf = ''
+    var raw = false
+    var settled = false
+    function shape(text, isRaw, final) {
+      var t = isRaw ? text : IC_CORE.stripEcho(c.before, text)
+      t = IC_CORE.fixLeadingSpace(c.before, t, isRaw)
+      return IC_CORE.cut(t, c.strength, final)
+    }
+    function finish(text) {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(text || '')
+    }
+    var timer = setTimeout(function () {
+      // 3 s: show what is complete so far (if anything) and stop paying for the rest.
+      finish(buf ? shape(buf, raw, false).text : '')
+      ac.abort()
+    }, 3000)
+    ac.signal.addEventListener('abort', function () { finish('') })
+    icCallModel(c, ac.signal, function (d, isRaw) {
+      if (settled) return
+      buf += d
+      raw = isRaw
+      var r = shape(buf, raw, false)
+      if (r.done) { finish(r.text); ac.abort() }
+    }).then(function (res) {
+      // Finished on its own: the chat fallback's final text is trimmed and fence-stripped; FIM's is raw.
+      var text = res.raw ? (buf || res.text) : (res.text || buf)
+      finish(shape(text, res.raw, true).text)
+    }, function (e) {
+      if (!settled && e && !(ac.signal && ac.signal.aborted)) console.debug('[inline-complete] request failed:', e && e.message ? e.message : e)
+      finish('')
+    })
+  })
+}
+
+// ── Editor extension ──────────────────────────────────────────────────────────────────────────
+function icBlockText(n) {
+  var t = n.textBetween(0, n.content.size, '\n', ' ')
+  return n.type.name === 'heading' ? new Array((n.attrs && n.attrs.level) || 1).fill('#').join('') + ' ' + t : t
+}
+/** before / after for the model. before: from the current section's heading (or the note start) to
+ *  the caret, whole blocks only, ≤ 2000 characters. after: what follows in the same top-level block
+ *  plus the next block, ≤ 300 characters. */
+function icContext(state) {
+  var doc = state.doc
+  var $h = state.selection.$head
+  var idx = $h.index(0)
+  var blocks = []
+  var total = 0
+  for (var i = idx - 1; i >= 0; i--) {
+    var n = doc.child(i)
+    var txt = icBlockText(n)
+    blocks.unshift({ text: txt, heading: n.type.name === 'heading' })
+    total += txt.length + 2
+    if (n.type.name === 'heading' || total > 2400) break
+  }
+  blocks.push({ text: doc.textBetween($h.start(1), $h.pos, '\n', ' '), heading: false })
+  var before = IC_CORE.sectionPrefix(blocks, 2000)
+  var after = doc.textBetween($h.pos, $h.end(1), '\n', ' ')
+  if (idx + 1 < doc.childCount) after += (after ? '\n' : '') + '\n' + icBlockText(doc.child(idx + 1))
+  after = after.replace(/^\s+/, '').slice(0, 300)
+  return { before: before, after: after, strength: icSettings.strength }
+}
+
+function icFacts(view) {
+  var st = view.state
+  var sel = st.selection
+  var $h = sel.$head
+  var anc = []
+  for (var d = $h.depth - 1; d >= 0; d--) anc.push($h.node(d).type.name)
+  var marks = (st.storedMarks || $h.marks()).map(function (m) { return m.type.name })
+  var parent = $h.parent
+  return {
+    enabled: icSettings.enabled && icCanSuggest(),
+    focused: view.hasFocus(),
+    editable: view.editable,
+    composing: view.composing,
+    selectionEmpty: sel.empty,
+    atBlockEnd: parent.isTextblock && $h.parentOffset === parent.content.size,
+    blockType: parent.type.name,
+    blockIsCode: !!parent.type.spec.code,
+    ancestors: anc,
+    marks: marks,
+    blockBefore: parent.textBetween(0, $h.parentOffset, '\n', ' '),
+  }
+}
+
+if (typeof ctx.registerEditorExtension === 'function') {
+  ctx.registerEditorExtension(function (pm) {
+    var key = new pm.PluginKey('inline-complete')
+    // Per editor instance: pause timer, the request in flight, the last ghost id.
+    var ctl = { view: null, timer: 0, ac: null, seq: 0 }
+
+    function cancelPending() {
+      if (ctl.timer) { clearTimeout(ctl.timer); ctl.timer = 0 }
+      if (ctl.ac) { var a = ctl.ac; ctl.ac = null; a.abort() }
+    }
+    function visible(g) { return !!(g && !g.hidden && g.full.length > g.typed) }
+
+    // Re-derive the ghost after a change. Alive only while the caret is still at the end of the same
+    // block and everything typed since the ghost appeared is a prefix of it (type-through).
+    function recheck(g, tr, state, composing) {
+      try {
+        var anchor = tr.docChanged ? tr.mapping.map(g.anchor, -1) : g.anchor
+        if (composing) return { anchor: anchor, full: g.full, typed: g.typed, id: g.id, fresh: false, hidden: true }
+        var sel = state.selection
+        if (!sel.empty) return null
+        var $h = sel.$head
+        if (!$h.parent.isTextblock || $h.parentOffset !== $h.parent.content.size) return null
+        if (sel.head < anchor || anchor < $h.start()) return null
+        var typed = state.doc.textBetween(anchor, sel.head, '\n', ' ')
+        var rest = IC_CORE.typeThrough(g.full, typed)
+        if (!rest || typed.length < g.typed) return null // typed it all, mismatch, or deleted
+        return { anchor: anchor, full: g.full, typed: typed.length, id: g.id, fresh: g.fresh && typed.length === g.typed, hidden: false }
+      } catch (e) {
+        return null
+      }
+    }
+
+    function accept(view, all) {
+      var g = key.getState(view.state)
+      if (!visible(g)) return false
+      var rest = g.full.slice(g.typed)
+      var piece = all ? rest : IC_CORE.nextWord(rest)
+      var tr = view.state.tr.insertText(piece, view.state.selection.head)
+      if (all) tr.setMeta(key, null)
+      view.dispatch(tr.scrollIntoView())
+      return true
+    }
+    function dismiss(view) {
+      if (!key.getState(view.state)) return false
+      view.dispatch(view.state.tr.setMeta(key, null))
+      return true
+    }
+
+    function schedule(view) {
+      cancelPending()
+      if (!icSettings.enabled || !icCanSuggest()) return
+      ctl.timer = setTimeout(function () { ctl.timer = 0; fire(view) }, icPauseMs())
+    }
+    function fire(view) {
+      if (!ctl.view || ctl.view !== view) return
+      if (visible(key.getState(view.state))) return
+      if (IC_CORE.gate(icFacts(view))) return
+      var st = view.state
+      var c = icContext(st)
+      var ac = new AbortController()
+      ctl.ac = ac
+      var id = ++ctl.seq
+      icSuggest(c, ac).then(function (text) {
+        if (ctl.ac === ac) ctl.ac = null
+        if (!text || ctl.view !== view) return
+        // Only if nothing moved while we waited (a new keystroke aborts us anyway).
+        if (view.state.doc !== st.doc || view.state.selection.head !== st.selection.head || !view.hasFocus()) return
+        if (IC_CORE.gate(icFacts(view))) return
+        view.dispatch(view.state.tr.setMeta(key, { anchor: st.selection.head, full: text, typed: 0, id: id, fresh: true, hidden: false }))
+      })
+    }
+
+    function render(view, text, fresh) {
+      var touch = icTouch()
+      var wrap = document.createElement('span')
+      wrap.className = 'ic-wrap' + (fresh ? ' ic-fresh' : '') + (touch ? ' ic-touch' : '')
+      wrap.setAttribute('contenteditable', 'false')
+      wrap.setAttribute('data-inline-complete', '')
+      var ghost = document.createElement('span')
+      ghost.className = 'ic-ghost'
+      ghost.textContent = text
+      ghost.setAttribute('aria-hidden', 'true')
+      wrap.appendChild(ghost)
+      var kbd = document.createElement('span')
+      if (touch) {
+        kbd.className = 'ic-kbd ic-tap'
+        kbd.textContent = icT('kbd.accept')
+        kbd.setAttribute('role', 'button')
+        // Tapping the pill or the grey text accepts. pointerdown + preventDefault keeps the focus
+        // (and the phone keyboard) where it is.
+        wrap.addEventListener('pointerdown', function (e) { e.preventDefault(); e.stopPropagation(); accept(view, true) })
+        wrap.addEventListener('mousedown', function (e) { e.preventDefault() })
+      } else {
+        kbd.className = 'ic-kbd'
+        kbd.textContent = 'Tab'
+        kbd.setAttribute('aria-hidden', 'true')
+      }
+      wrap.appendChild(kbd)
+      return wrap
+    }
+
+    return [new pm.Plugin({
+      key: key,
+      state: {
+        init: function () { return null },
+        apply: function (tr, g, oldState, newState) {
+          var meta = tr.getMeta(key)
+          if (meta !== undefined) return meta && meta.recheck ? (g ? recheck(g, tr, newState, false) : null) : meta
+          if (!g) return null
+          if (!tr.docChanged && !tr.selectionSet) return g
+          return recheck(g, tr, newState, !!(ctl.view && ctl.view.composing))
+        },
+      },
+      props: {
+        decorations: function (state) {
+          var g = key.getState(state)
+          if (!visible(g)) return null
+          var rest = g.full.slice(g.typed)
+          var pos = state.selection.head
+          return pm.DecorationSet.create(state.doc, [pm.Decoration.widget(pos, function (view) { return render(view, rest, g.fresh) }, {
+            side: 1, ignoreSelection: true, key: 'ic' + g.id + ':' + g.typed + (g.fresh ? 'f' : ''), stopEvent: function () { return true },
+          })])
+        },
+        handleKeyDown: function (view, e) {
+          var g = key.getState(view.state)
+          if (!visible(g) || e.isComposing || view.composing) return false
+          if (e.key === 'Tab' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) { e.preventDefault(); return accept(view, true) }
+          if (e.key === 'Escape' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) return dismiss(view)
+          if (e.key === 'ArrowRight' && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) { e.preventDefault(); return accept(view, false) }
+          return false
+        },
+        handleDOMEvents: {
+          blur: function (view) { cancelPending(); if (key.getState(view.state)) dismiss(view); return false },
+          compositionstart: function (view) {
+            var g = key.getState(view.state)
+            if (visible(g)) view.dispatch(view.state.tr.setMeta(key, { anchor: g.anchor, full: g.full, typed: g.typed, id: g.id, fresh: false, hidden: true }))
+            return false
+          },
+          compositionend: function (view) {
+            // The committed text decides: a prefix of the ghost eats into it; anything else kills it.
+            setTimeout(function () {
+              if (ctl.view !== view || view.composing) return
+              var g = key.getState(view.state)
+              if (!g) return
+              view.dispatch(view.state.tr.setMeta(key, { recheck: true }))
+              if (!visible(key.getState(view.state))) {
+                if (key.getState(view.state)) view.dispatch(view.state.tr.setMeta(key, null))
+                if (view.hasFocus()) schedule(view)
+              }
+            }, 0)
+            return false
+          },
+        },
+      },
+      view: function (v) {
+        ctl.view = v
+        return {
+          update: function (view, prev) {
+            var docChanged = view.state.doc !== prev.doc
+            if (!docChanged && view.state.selection.eq(prev.selection)) return
+            // The caret moved or the text changed: whatever we were waiting for is stale.
+            cancelPending()
+            if (visible(key.getState(view.state))) return // type-through: keep the ghost, ask nothing
+            if (docChanged && view.hasFocus()) schedule(view)
+          },
+          destroy: function () { cancelPending(); ctl.view = null },
+        }
+      },
+    })]
+  }, { priority: 'high' })
+} else {
+  console.info('[inline-complete] this host has no editor extensions; nothing to do')
+}
+if (!icCanSuggest()) console.info('[inline-complete] ctx.tangu.fim / complete is not available on this host; suggestions are off')
+
+// ── Commands ──────────────────────────────────────────────────────────────────────────────────
+function icNotify(msg) { try { if (ctx.notify) ctx.notify(msg, { level: 'info', key: 'inline-complete' }) } catch (e) { /* old host */ } }
+ctx.registerCommand({
+  id: 'toggle',
+  title: function () { return icT('cmd.toggle') },
+  keywords: 'inline completion autocomplete ghost copilot 行内补全 自动补全 续写 hnbq',
+  checked: function () { return icSettings.enabled },
+  run: function () {
+    icSaveSettings({ enabled: !icSettings.enabled })
+    icNotify(icT(icSettings.enabled ? 'toast.on' : 'toast.off'))
+  },
+})
+ctx.registerCommand({
+  id: 'cycle-strength',
+  title: function () { return icT('cmd.cycle') },
+  keywords: 'inline completion length short medium long 行内补全 长度 短 中 长',
+  run: function () {
+    var list = IC_CORE.STRENGTHS
+    var next = list[(list.indexOf(icSettings.strength) + 1) % list.length]
+    icSaveSettings({ strength: next })
+    icNotify(icT('toast.strength', { name: icT('strength.' + next) }))
+  },
+})
+
+// ── Settings page ─────────────────────────────────────────────────────────────────────────────
+function icSettingsSchema() {
+  var items = [
+    { id: 'enabled', type: 'switch', title: icT('set.enabled'), value: icSettings.enabled, onChange: function (v) { icSaveSettings({ enabled: !!v }) } },
+    {
+      id: 'strength', type: 'segmented', title: icT('set.strength'), desc: icT('set.strengthDesc') + ' ' + icT('strength.' + icSettings.strength + '.detail'),
+      value: icSettings.strength, disabled: !icSettings.enabled,
+      options: IC_CORE.STRENGTHS.map(function (s) { return { value: s, label: icT('strength.' + s), detail: icT('strength.' + s + '.detail') } }),
+      onChange: function (v) { icSaveSettings({ strength: v }) },
+    },
+    {
+      id: 'pause', type: 'segmented', title: icT('set.pause'), desc: icT('set.pauseDesc'), value: icSettings.pause, disabled: !icSettings.enabled,
+      options: ['auto', '300', '500', '1000'].map(function (p) { return { value: p, label: icT('pause.' + p) } }),
+      onChange: function (v) { icSaveSettings({ pause: v }) },
+    },
+  ]
+  if (!icCanSuggest()) items.push({ id: 'na', type: 'state', state: { kind: 'empty', title: icT('set.unavailable') } })
+  return { groups: [{ id: 'main', title: icT('set.group'), desc: icT('set.groupDesc') + ' ' + icT('set.modelDesc'), items: items }] }
+}
+// Hosts without the settings parts: a plain form drawn with host tokens.
+function icPlainSettings(el) {
+  el.innerHTML = ''
+  var box = document.createElement('div')
+  box.style.cssText = 'display:flex;flex-direction:column;gap:10px;font:var(--ui-font-meta,12px)/1.5 var(--font-ui);color:var(--text)'
+  function row(label, control) {
+    var r = document.createElement('label')
+    r.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px'
+    var s = document.createElement('span'); s.textContent = label
+    r.appendChild(s); r.appendChild(control); box.appendChild(r)
+  }
+  var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = icSettings.enabled
+  cb.addEventListener('change', function () { icSaveSettings({ enabled: cb.checked }) })
+  row(icT('set.enabled'), cb)
+  function select(values, cur, labelOf, onPick) {
+    var s = document.createElement('select')
+    values.forEach(function (v) { var o = document.createElement('option'); o.value = v; o.textContent = labelOf(v); if (v === cur) o.selected = true; s.appendChild(o) })
+    s.addEventListener('change', function () { onPick(s.value) })
+    return s
+  }
+  row(icT('set.strength'), select(IC_CORE.STRENGTHS, icSettings.strength, function (v) { return icT('strength.' + v) }, function (v) { icSaveSettings({ strength: v }) }))
+  row(icT('set.pause'), select(['auto', '300', '500', '1000'], icSettings.pause, function (v) { return icT('pause.' + v) }, function (v) { icSaveSettings({ pause: v }) }))
+  var hint = document.createElement('div'); hint.style.color = 'var(--text-muted)'; hint.textContent = icT('set.modelDesc')
+  box.appendChild(hint)
+  el.appendChild(box)
+}
+if (typeof ctx.registerSettingsView === 'function') {
+  ctx.registerSettingsView({
+    id: 'main',
+    mount: function (el) {
+      var handle = null
+      function draw() {
+        if (handle) handle.update(icSettingsSchema())
+        else icPlainSettings(el)
+      }
+      if (ctx.ui && typeof ctx.ui.mountSettingsPage === 'function') handle = ctx.ui.mountSettingsPage(el, icSettingsSchema())
+      else icPlainSettings(el)
+      icSettingsListeners.push(draw)
+      var offLocale = ctx.subscribeLocale ? ctx.subscribeLocale(draw) : null
+      return function () {
+        icSettingsListeners = icSettingsListeners.filter(function (f) { return f !== draw })
+        if (offLocale) offLocale()
+        if (handle) handle.dispose()
+      }
+    },
+  })
+}
