@@ -106,6 +106,13 @@ t('stripEcho: repeated tail removed', () => {
   assert.equal(C.stripEcho('下周三之前把', '之前把新版首页发出去'), '新版首页发出去')
   assert.equal(C.stripEcho('abc', 'xyz'), 'xyz')
   assert.equal(C.stripEcho('哈哈', '哈哈哈'), '哈哈哈') // too short to call it an echo
+  // Latin echoes only on whole words
+  assert.equal(C.stripEcho('We should discuss the', 'theory of mind'), 'theory of mind')
+  assert.equal(C.stripEcho('cats and', 'android apps'), 'android apps')
+  assert.equal(C.stripEcho('good for', 'formal reasons'), 'formal reasons')
+  assert.equal(C.stripEcho('time to bathe', 'the draft'), 'the draft')
+  assert.equal(C.stripEcho('discuss the', 'the plan'), ' plan')
+  assert.equal(C.stripEcho('we should', 'should move'), ' move')
 })
 
 // ── word segmentation ──

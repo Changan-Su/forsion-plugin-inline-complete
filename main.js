@@ -111,8 +111,14 @@ var IC_CORE = (function () {
     var b = String(before || '')
     var t = String(text || '')
     var max = Math.min(40, b.length, t.length)
+    var LATIN = /[A-Za-z0-9\u00C0-\u024F'\u2019_-]/
     for (var n = max; n >= 3; n--) {
-      if (b.slice(-n) === t.slice(0, n)) return t.slice(n)
+      if (b.slice(-n) !== t.slice(0, n)) continue
+      // Latin text must match whole words on both sides: "the" + "theory" is not an echo.
+      if (LATIN.test(t[n - 1]) && n < t.length && LATIN.test(t[n])) continue
+      var at = b.length - n
+      if (LATIN.test(b[at]) && at > 0 && LATIN.test(b[at - 1])) continue
+      return t.slice(n)
     }
     return t
   }
