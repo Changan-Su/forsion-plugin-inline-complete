@@ -1,5 +1,10 @@
 # 更新日志 / Changelog
 
+## 待发布 / Unreleased
+
+- 暂无补全模型时只对当次建议回退聊天模型。启用 FIM 后，后续建议可以自动切换。
+  Fall back to the chat model for one suggestion at a time. Later suggestions can pick up a newly enabled FIM model.
+
 ## 1.0.0 — 2026-10-26
 
 首个版本 / First release.
