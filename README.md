@@ -37,10 +37,10 @@ Settings live in the plugin's own data (`ctx.saveData`) rather than `registerSet
 
 ## 模型 / Model
 
-优先用宿主的 `ctx.tangu.fim`（「设置 → 模型 → 补全」里选的补全模型，原样续写、最省）；宿主没有它、或回 `fim_unavailable`（没有可用的补全模型）时，本次会话改用 `ctx.tangu.complete`（聊天模型 + 一段英文指令）。
+优先用宿主的 `ctx.tangu.fim`（「设置 → 模型 → 默认模型 → 补全」里选的模型）。宿主没有它或回 `fim_unavailable` 时，这一次用聊天模型。下一次建议会重新检查补全模型。
 发给模型的上文从当前小节的标题（没有就从笔记开头）到光标，按整块截到 2000 字以内，好让同一小节里连续打字时前缀不变、能吃到提供方的缓存；下文是后面一块的开头（≤ 300 字）。
 
-Prefers the host's `ctx.tangu.fim` (the completion model picked in Settings → Models → Completion: raw fill-in-the-middle, cheapest). Without it, or when it answers `fim_unavailable`, the rest of the session uses `ctx.tangu.complete` (the chat model plus an English instruction). The text before the caret is sent from the current section's heading (or the note start), cut by whole blocks to ≤ 2000 characters so the prefix stays stable for provider caching; the text after is the start of the next block (≤ 300 characters).
+Prefers the host's `ctx.tangu.fim` (the completion model picked in Settings → Models → Default models → Completion). If the host lacks it or returns `fim_unavailable`, that suggestion uses the chat model. The next suggestion checks for a completion model again. The text before the caret is sent from the current section's heading (or the note start), cut by whole blocks to ≤ 2000 characters so the prefix stays stable for provider caching; the text after is the start of the next block (≤ 300 characters).
 
 ## 开发 / Development
 
@@ -53,3 +53,4 @@ node .claude/hooks/devlock.cjs run --vehicle=e2e --what="行内补全插件验�
 ```
 
 `GENESIS_DESKTOP` 指向一份已构建的 Genesis desktop 检出 / points at a built Genesis desktop checkout.
+`FIM=1` 验证 FIM 和 3 秒超时，`FIM_SWITCH=1` 验证运行时从聊天切到 FIM。 / `FIM=1` checks FIM and the three-second timeout. `FIM_SWITCH=1` checks switching from chat to FIM in the same window.

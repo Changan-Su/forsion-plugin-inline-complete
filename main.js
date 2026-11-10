@@ -352,19 +352,17 @@ function icTouch() {
 
 // ── Model call ────────────────────────────────────────────────────────────────────────────────
 // Prefer ctx.tangu.fim (completion-only models, raw text). Fall back to ctx.tangu.complete with an
-// instruction for the rest of the session when fim is missing or says fim_unavailable.
-var icFimOff = false
+// instruction for this suggestion when fim is missing or says fim_unavailable.
+// The host can discover newly enabled FIM models without reloading this plugin.
 function icCanSuggest() { return !!(ctx.tangu && (typeof ctx.tangu.fim === 'function' || typeof ctx.tangu.complete === 'function')) }
 function icCallModel(c, signal, onDelta, onReset) {
   var tg = ctx.tangu
-  if (!icFimOff && tg && typeof tg.fim === 'function') {
+  if (tg && typeof tg.fim === 'function') {
     var fr = IC_CORE.FIM_REQ[c.strength]
     return tg.fim({ before: c.before, after: c.after || undefined, maxTokens: fr.maxTokens, stop: fr.stop, signal: signal, onDelta: function (d) { onDelta(d, true) } })
       .then(function (r) { return { text: String((r && r.text) || ''), raw: true } }, function (e) {
-        // fim_unavailable = no completion model / the engine cannot do FIM: use complete for the rest of the
-        // session, whatever already streamed. Anything else (fim_catalog_unreachable, network) stays transient.
+        // A missing FIM model falls back for this attempt. Network/catalog errors stay transient.
         if (e && e.message === 'fim_unavailable') {
-          icFimOff = true
           if (signal && signal.aborted) throw e
           if (onReset) onReset()
           return icViaComplete(c, signal, onDelta)
