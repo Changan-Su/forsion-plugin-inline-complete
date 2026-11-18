@@ -62,7 +62,7 @@ for (const k of Object.keys(MSG.en)) {
   const ph = (s) => (s.match(/\{\w+\}/g) || []).sort().join()
   assert.equal(ph(MSG.zh[k]), ph(MSG.en[k]), `placeholders of ${k}`)
 }
-// Model path: FIM first; fim_unavailable switches to complete for the rest of the session; streams are cut.
+// Model path: try FIM on every suggestion, fall back on fim_unavailable, and cut streams to length.
 {
   const calls = []
   let fimMode = 'stream'
@@ -86,9 +86,10 @@ for (const k of Object.keys(MSG.en)) {
   assert.ok(aborted, 'stream aborted once the sentence was complete')
   fimMode = 'unavailable'
   assert.equal(await api.icSuggest(c, new AbortController()), ' finish it', 'falls back to complete, space restored')
-  assert.equal(await api.icSuggest(c, new AbortController()), ' finish it')
-  assert.deepEqual(calls, ['fim', 'fim', 'complete', 'complete'], 'after fim_unavailable, fim is not tried again')
-  // fim streamed something, then said fim_unavailable: the stream is dropped, complete answers, and it latches.
+  fimMode = 'stream'
+  assert.equal(await api.icSuggest(c, new AbortController()), ' finish the draft today.', 'switches back to FIM without reloading')
+  assert.deepEqual(calls, ['fim', 'fim', 'complete', 'fim'])
+  // If FIM streamed something before returning fim_unavailable, discard that output before falling back.
   {
     const calls2 = []
     const t2 = {
@@ -98,7 +99,7 @@ for (const k of Object.keys(MSG.en)) {
     const api2 = new Function('ctx', code + '\nreturn { icSuggest }')({ registerCommand() {}, getLocale: () => 'en', tangu: t2 })
     assert.equal(await api2.icSuggest(c, new AbortController()), ' finish it', 'partial fim text is discarded before the retry')
     assert.equal(await api2.icSuggest(c, new AbortController()), ' finish it')
-    assert.deepEqual(calls2, ['fim', 'complete', 'complete'], 'fim_unavailable after a delta still latches')
+    assert.deepEqual(calls2, ['fim', 'complete', 'fim', 'complete'])
   }
   // fim_catalog_unreachable (cloud catalog fetch failed) is transient: no fallback, fim is tried again.
   {

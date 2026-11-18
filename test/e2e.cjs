@@ -15,7 +15,8 @@ const ROOT = path.join(__dirname, '..')
 const OUT = path.join(__dirname, '.out'); fs.mkdirSync(OUT, { recursive: true })
 const SHOT = process.env.SHOT || path.join(OUT, 'ghost.png')
 // FIM=1: the stub offers a completion model (catalog fimModels) and answers action 'fim' — for a host with ctx.tangu.fim.
-const FIM = process.env.FIM === '1'
+const FIM_SWITCH = process.env.FIM_SWITCH === '1'
+const FIM = process.env.FIM === '1' || FIM_SWITCH
 const ACTION = FIM ? 'fim' : 'custom'
 
 // Test data lives here only (the plugin itself ships empty).
@@ -52,20 +53,22 @@ async function main() {
   fs.writeFileSync(path.join(hdir, 'manifest.json'), JSON.stringify({ id: 'ic-test-helper', name: 'IC test helper', version: '1.0.0', minAppVersion: '0.0.1', description: 'e2e only' }))
   fs.writeFileSync(path.join(hdir, 'main.js'), `window.__icTest = { open: function (p) { ctx.app.openNote(p, { activate: true }) }, hasComplete: !!(ctx.tangu && ctx.tangu.complete), hasFim: !!(ctx.tangu && ctx.tangu.fim) }`)
 
-  // Stub engine: POST /agent/inline answers like routes/inline.ts (SSE delta* → done). mode: normal | slow
+  // Stub engine: POST /agent/inline answers like routes/inline.ts (SSE delta* → done).
   const inline = []
   let mode = 'normal'
+  const fimModels = [{ id: 'codestral', name: 'Codestral', provider: 'stub', apiModelId: 'codestral-latest' }]
+  const modelsMeta = { fimModels: FIM && !FIM_SWITCH ? fimModels : [] }
   const sse = (frames) => ({ __buffer: Buffer.from(frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join('')), contentType: 'text/event-stream' })
   const stub = await startStubEngine({
     models: [{ id: 'gpt-6-luna', name: 'GPT-6 Luna', provider: 'stub', source: 'forsion' }],
-    ...(FIM ? { modelsMeta: { fimModels: [{ id: 'codestral', name: 'Codestral', provider: 'stub', apiModelId: 'codestral-latest' }] } } : {}),
+    modelsMeta,
     override: async ({ path: p, method, body }) => {
       if (p !== '/agent/inline' || method !== 'POST') return undefined
       const b = await body()
       inline.push(b)
-      if (b.action === 'fim' && !FIM) return sse([{ type: 'error', error: 'fim_unsupported' }])
-      if (mode === 'slow') { await new Promise((r) => setTimeout(r, 3600)); return sse([{ type: 'done', content: '太晚了', modelId: 'gpt-6-luna' }]) }
-      await new Promise((r) => setTimeout(r, 150))
+      if (b.action === 'fim' && !modelsMeta.fimModels.length) return sse([{ type: 'error', error: 'fim_unsupported' }])
+      const delay = mode === 'slow' ? 3600 : mode === 'within-deadline' ? 2200 : 150
+      await new Promise((r) => setTimeout(r, delay))
       const deltas = ANSWER.match(/.{1,6}/g).map((text) => ({ type: 'delta', text }))
       return sse([...deltas, { type: 'done', content: ANSWER, modelId: 'gpt-6-luna' }])
     },
@@ -95,6 +98,23 @@ async function main() {
     const lastP = pm.locator('p').last()
     const docText = () => pm.evaluate((el) => { const c = el.cloneNode(true); c.querySelectorAll('[data-inline-complete]').forEach((x) => x.remove()); return c.textContent })
     const placeEnd = async (loc) => { const b = await loc.boundingBox(); await win.mouse.click(b.x + b.width - 2, b.y + b.height / 2); await win.keyboard.press('End') }
+
+    if (FIM_SWITCH) {
+      await placeEnd(lastP)
+      await win.keyboard.type('今天')
+      await ghost.waitFor({ timeout: 4000 })
+      check('starts with chat when FIM is unavailable', inline.length === 1 && inline[0].action === 'custom')
+      await win.keyboard.press('Escape')
+
+      // Enable the model after the plugin has already fallen back. Wait out the host's negative cache.
+      modelsMeta.fimModels = fimModels
+      await win.waitForTimeout(15_500)
+      await win.keyboard.type('需要')
+      await ghost.waitFor({ timeout: 4000 })
+      check('next suggestion uses newly enabled FIM in the same window', inline.length === 2 && inline[1].action === 'fim' && inline[1].model_id === 'codestral', inline.map((b) => b.action).join(','))
+      if (checks.some((c) => !c.ok)) throw new Error('FIM switch acceptance failed')
+      return
+    }
 
     // ① type, pause → ghost
     await placeEnd(lastP)
@@ -174,10 +194,22 @@ async function main() {
     check('no suggestion mid-paragraph', inline.length === n7 && (await ghost.count()) === 0, `requests=${inline.length - n7}`)
 
     // ⑧ the model is too slow (> 3 s): give up, draw nothing
+    // Set the paragraph end explicitly: End can stop at a wrapped visual line.
+    await lastP.evaluate((p) => {
+      p.closest('[contenteditable="true"]').focus()
+      const selection = window.getSelection()
+      selection.selectAllChildren(p)
+      selection.collapseToEnd()
+    })
     mode = 'slow'
-    await win.keyboard.press('End'); await win.keyboard.type('再')
+    await win.keyboard.type('再')
     await win.waitForTimeout(4800)
     check('gives up after 3 s', (await ghost.count()) === 0 && inline.length === n7 + 1, `requests=${inline.length - n7}`)
+    mode = 'within-deadline'
+    await win.keyboard.type('说')
+    await ghost.waitFor({ timeout: 4000 }).catch(() => {})
+    check('shows the same suggestion when the model answers in 2.2 s', (await ghost.count()) === 1 && (await ghost.textContent()) === SENTENCE && inline.length === n7 + 2)
+    await win.keyboard.press('Escape')
     mode = 'normal'
 
     // ⑨ no ghost: Tab still indents a list item (the host keeps the key)
