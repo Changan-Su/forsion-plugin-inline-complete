@@ -35,6 +35,9 @@ A Forsion / Amadeus plugin: Copilot-style completion while you write notes. Paus
 设置存在插件自己的数据里（`ctx.saveData`），不走 `registerSetting`：长度是三选一，而 `registerSetting` 只有数字 / 开关 / 文本。
 Settings live in the plugin's own data (`ctx.saveData`) rather than `registerSetting`, which has no choice type.
 
+存过的设置读不出来时（宿主报 `plugin-data-unreadable`：读出错、空文件、写到一半或被手改坏），行内补全当作关闭、提示一次，这次运行里不保存、也不接受设置改动，原来的设置不动；下次启动重新读。没存过时照旧用缺省设置（打开、中、跟随长度）。
+When the saved settings can't be read (the host reports `plugin-data-unreadable`: a read error, an empty file, a write cut off halfway, or a hand edit that broke it), inline completion is treated as off and you're told once; for this run nothing is saved and settings changes are refused, so the original is left as it was. The next start reads it again. With nothing saved yet the defaults apply as before (on, medium, follow length).
+
 ## 模型 / Model
 
 优先用宿主的 `ctx.tangu.fim`（「设置 → 模型 → 补全」里选的补全模型，原样续写、最省）；宿主没有它、或回 `fim_unavailable`（没有可用的补全模型）时，本次会话改用 `ctx.tangu.complete`（聊天模型 + 一段英文指令）。
