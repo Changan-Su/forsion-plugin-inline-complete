@@ -162,4 +162,148 @@ for (const k of Object.keys(MSG.en)) {
   toggle.run() // off again: the destroyed editor is not touched
   assert.equal(sent.length, 1, 'destroyed editors unsubscribe')
 }
+// Saved settings that can't be read (hosts from 2026-11-17 reject loadData with code 'plugin-data-unreadable'):
+// paused (treated as off, no requests), nothing saved, changes refused with a notice; changes made before the read
+// lands wait for it. Counted instead of fail-fast so the negative control (this block against origin/main's
+// main.js) reports how many go red.
+{
+  let pass = 0
+  const bad = []
+  const ok = (name, cond, extra) => { if (cond) pass++; else bad.push(`${name}${extra === undefined ? '' : ` — ${extra}`}`) }
+  const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)) }
+  const unreadable = () => Object.assign(new Error('plugin-data-unreadable'), { code: 'plugin-data-unreadable', reason: 'invalid-json' })
+  const realWarn = console.warn
+  console.warn = () => {}
+  let unhandled = 0
+  const onUnhandled = () => { unhandled++ }
+  process.on('unhandledRejection', onUnhandled)
+  function boot({ locale = 'zh', loadData } = {}) {
+    let spec = null
+    const pm = {
+      PluginKey: function () { this.getState = (st) => st.__g },
+      Plugin: function (sp) { spec = sp },
+      DecorationSet: { create: () => ({}) }, Decoration: { widget: () => ({}) },
+    }
+    const got = { cmds: [], views: [], pages: [], notes: [], saves: [], modelCalls: 0 }
+    const ctx = {
+      getLocale: () => locale,
+      registerCommand: (c) => got.cmds.push(c),
+      registerSettingsView: (v) => got.views.push(v),
+      registerEditorExtension: (f) => f(pm, {}),
+      notify: (m, o) => got.notes.push({ m, level: o?.level }),
+      saveData: async (v) => { got.saves.push(JSON.parse(JSON.stringify(v))) },
+      ui: { mountSettingsPage: (el, schema) => { got.pages.push(schema); return { update: (sc) => got.pages.push(sc), dispose() {} } } },
+      tangu: { complete: async () => { got.modelCalls++; return { text: '' } } },
+      ...(loadData ? { loadData } : {}),
+    }
+    new Function('ctx', code)(ctx)
+    got.cmd = (id) => got.cmds.find((c) => c.id === id)
+    got.warnings = () => got.notes.filter((n) => n.level === 'warning')
+    got.item = (id) => (got.pages.at(-1)?.groups?.[0]?.items ?? []).find((it) => it.id === id)
+    /** One edit in an open editor: count the pause timers it starts (a timer = a model request on its way). */
+    got.typeOnce = () => {
+      let timers = 0
+      const realSetTimeout = globalThis.setTimeout
+      globalThis.setTimeout = () => { timers++; return 0 }
+      try {
+        const view = { state: { doc: {}, selection: {} }, hasFocus: () => true, dispatch() {} }
+        const pv = spec?.view?.(view)
+        pv?.update?.(view, { doc: { other: true }, selection: {} })
+        pv?.destroy?.()
+      } finally { globalThis.setTimeout = realSetTimeout }
+      return timers
+    }
+    return got
+  }
+
+  // 1. Unreadable: paused, told once at start, nothing saved, every change refused with the notice.
+  {
+    const g = boot({ loadData: async () => { throw unreadable() } })
+    await settle()
+    ok('unreadable: one warning at start', g.warnings().length === 1, JSON.stringify(g.notes))
+    ok('unreadable: warning is the zh notice', /读不出已保存的行内补全设置/.test(g.warnings()[0]?.m ?? ''), g.warnings()[0]?.m)
+    ok('unreadable: treated as off (toggle shows unchecked)', g.cmd('toggle')?.checked?.() === false)
+    ok('unreadable: an edit schedules no model request', g.typeOnce() === 0)
+    g.cmd('toggle')?.run()
+    await settle()
+    ok('unreadable: toggle saves nothing', g.saves.length === 0, JSON.stringify(g.saves))
+    ok('unreadable: toggle does not turn it on', g.cmd('toggle')?.checked?.() === false)
+    ok('unreadable: toggle repeats the warning', g.warnings().length === 2, JSON.stringify(g.notes))
+    ok('unreadable: no "is on" toast after a refused toggle', !g.notes.some((n) => /行内补全已打开/.test(n.m)), JSON.stringify(g.notes))
+    g.cmd('cycle-strength')?.run()
+    await settle()
+    ok('unreadable: cycle-strength saves nothing', g.saves.length === 0, JSON.stringify(g.saves))
+    g.views[0]?.mount?.({})
+    ok('unreadable: settings page shows the notice', /读不出已保存/.test(g.item('unreadable')?.state?.title ?? ''), JSON.stringify(g.pages.at(-1)))
+    ok('unreadable: settings switch shows off and is disabled', g.item('enabled')?.value === false && g.item('enabled')?.disabled === true)
+    ok('unreadable: settings page items have change handlers', typeof g.item('enabled')?.onChange === 'function' && typeof g.item('pause')?.onChange === 'function')
+    const pagesBefore = g.pages.length
+    g.item('enabled')?.onChange?.(true)
+    g.item('pause')?.onChange?.('500')
+    await settle()
+    ok('unreadable: settings page changes save nothing', g.saves.length === 0, JSON.stringify(g.saves))
+    ok('unreadable: refused settings changes redraw the page', g.pages.length > pagesBefore)
+    ok('unreadable: switch redrawn as off after the refused change', g.item('enabled')?.value === false)
+    ok('unreadable: still no model request after the attempts', g.typeOnce() === 0 && g.modelCalls === 0)
+  }
+  // 2. Same in English: the notice has no Chinese.
+  {
+    const g = boot({ locale: 'en', loadData: async () => { throw unreadable() } })
+    await settle()
+    const m = g.warnings()[0]?.m ?? ''
+    ok('unreadable (en): English notice', /could not be read/.test(m) && !HAN.test(m), m)
+  }
+  // 3. Nothing saved yet (older hosts return null for unreadable data too): defaults, saving works, no notice.
+  {
+    const g = boot({ loadData: async () => null })
+    await settle()
+    ok('null: on by default', g.cmd('toggle')?.checked?.() === true)
+    ok('null: an edit schedules a request (the probe used above can see one)', g.typeOnce() === 1)
+    g.cmd('toggle')?.run()
+    await settle()
+    ok('null: toggle saves', g.saves.length === 1 && g.saves[0].enabled === false, JSON.stringify(g.saves))
+    g.views[0]?.mount?.({})
+    g.item('pause')?.onChange?.('500')
+    await settle()
+    ok('null: settings page change saves (the probe used above can see a save)', g.saves.length === 2 && g.saves[1].pause === '500', JSON.stringify(g.saves))
+    ok('null: no warning', g.warnings().length === 0, JSON.stringify(g.notes))
+  }
+  // 4b. Valid JSON with a strange value must not wedge startup: changes still save afterwards.
+  {
+    const before = unhandled
+    const g = boot({ loadData: async () => ({ enabled: false, pause: { toString: 'x' } }) })
+    await settle()
+    g.cmd('cycle-strength')?.run()
+    await settle()
+    ok('odd value: no unhandled rejection', unhandled === before)
+    ok('odd value: startup settles and saving works', g.saves.length === 1 && g.saves[0].enabled === false, JSON.stringify(g.saves))
+  }
+  // 4. Any other rejection keeps the old behaviour: defaults, saving works, no notice.
+  {
+    const g = boot({ loadData: async () => { throw new Error('boom') } })
+    await settle()
+    g.cmd('cycle-strength')?.run()
+    await settle()
+    ok('other error: saving works', g.saves.length === 1, JSON.stringify(g.saves))
+    ok('other error: no warning', g.warnings().length === 0, JSON.stringify(g.notes))
+  }
+  // 5. A change made while the read is still out waits for it and lands on top of the saved settings.
+  {
+    let release
+    const g = boot({ loadData: () => new Promise((r) => { release = r }) })
+    await settle()
+    ok('pending read: an edit schedules no model request yet', g.typeOnce() === 0)
+    g.cmd('cycle-strength')?.run()
+    await settle()
+    ok('pending read: nothing saved before the read lands', g.saves.length === 0, JSON.stringify(g.saves))
+    release?.({ enabled: false, strength: 'short', pause: '500' })
+    await settle()
+    ok('pending read: saved = original + the change', g.saves.length === 1 && JSON.stringify(g.saves[0]) === JSON.stringify({ enabled: false, strength: 'medium', pause: '500' }), JSON.stringify(g.saves))
+  }
+  console.warn = realWarn
+  process.off('unhandledRejection', onUnhandled)
+  console.log(`unreadable-data checks: ${pass}/${pass + bad.length} passed`)
+  for (const b of bad) console.log(`  FAIL ${b}`)
+  assert.equal(bad.length, 0, 'unreadable-data checks failed')
+}
 console.log('check ok')

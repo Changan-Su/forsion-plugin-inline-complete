@@ -2,7 +2,7 @@
   "id": "inline-complete",
   "name": "行内补全",
   "nameEn": "Inline completion",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "apiVersion": 1,
   "minAppVersion": "2.13.0",
   "main": "main.js",
