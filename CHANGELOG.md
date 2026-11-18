@@ -1,5 +1,12 @@
 # 更新日志 / Changelog
 
+## 1.0.1 — 2026-11-18
+
+- 保存的设置读不出来时（文件读出错、是空的、写到一半或被手改坏），行内补全先停用、提示一次：不出灰色续写、不把文字发给模型，也不保存改动，开关和长度这次改不了（试着改会再提示一次）。以前会按缺省设置接着用，缺省是「打开」，关掉过行内补全的人会被悄悄重新打开，下一次改设置还会把原来的设置盖掉。下次启动重新读；没存过时照旧用缺省设置。需要 2.14.2 之后的 Forsion（更早的版本读不出来时仍当没存过）。
+  When the saved settings can't be read (a read error, an empty file, a write cut off halfway, or a hand edit that broke it), inline completion is paused and you're told once: no suggestions, no text sent to a model, nothing saved, and the switch and length can't be changed this run (trying tells you again). Before, the plugin carried on with the defaults, which are "on", so someone who had turned it off got it back silently, and the next settings change overwrote the saved ones. The next start reads them again; with nothing saved yet the defaults apply as before. Needs Forsion newer than 2.14.2 (earlier versions still treat unreadable data as never saved).
+- 设置还没读回来时不再给建议；这时改的设置等读完再改、再保存，不会只存下缺省值加这一项。
+  No suggestions until the saved settings are in, and a settings change made before then waits for them instead of saving the defaults plus that one change.
+
 ## 1.0.0 — 2026-10-26
 
 首个版本 / First release.

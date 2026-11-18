@@ -30,6 +30,7 @@ var IC_MSG = {
     'pause.1000': '1 秒',
     'set.modelDesc': '在「设置 → 模型 → 补全」里选；没选时用聊天当前的模型。建议选一个快的小模型。',
     'set.unavailable': '这个宿主没有 Tangu 的补全能力，行内补全不会工作。',
+    'unreadable': '读不出已保存的行内补全设置，行内补全先停用，也不会保存改动，原来的设置没有动。现在不会出灰色续写，也不会把文字发给模型。',
   },
   en: {
     'kbd.accept': 'Accept',
@@ -57,6 +58,7 @@ var IC_MSG = {
     'pause.1000': '1 s',
     'set.modelDesc': 'Pick one in Settings → Models → Completion; without one, the current chat model is used. A small, fast model works best.',
     'set.unavailable': 'This host has no Tangu completion, so inline completion will not work here.',
+    'unreadable': 'Your saved inline completion settings could not be read. Inline completion is paused and nothing will be saved, so the original is left as it was. No suggestions will appear and no text is sent to a model for now.',
   },
 }
 function icLocale() { return (ctx.getLocale ? ctx.getLocale() : 'zh') === 'en' ? 'en' : 'zh' }
@@ -75,19 +77,53 @@ var icT = (ctx.i18n && typeof ctx.i18n.define === 'function')
 // is built from the effective plugin id, which a plugin cannot read (store installs differ).
 var icSettings = { enabled: true, strength: 'medium', pause: 'auto' }
 var icSettingsListeners = []
+function icFireSettings() { icSettingsListeners.forEach(function (f) { try { f() } catch (e) { /* listener */ } }) }
+// Saved but unreadable (hosts from 2026-11-17 reject loadData with code 'plugin-data-unreadable': a read error, a
+// zero-byte file, a half-written or hand-broken one). The defaults would turn completion back on — sending text to a
+// model — for someone who turned it off, and the next change would write the defaults over their settings. So:
+// paused (treated as off) for this run, nothing is saved, settings changes are refused, and the user is told.
+// Nothing saved yet (null) still means the defaults; older hosts return null for unreadable data too.
+// Any other rejection keeps the old behaviour (defaults, saving works).
+var icLoaded = !ctx.loadData
+var icBlocked = false
+function icDataUnreadable(e) { return !!e && typeof e === 'object' && e.code === 'plugin-data-unreadable' }
+function icWarnUnreadable() {
+  try { if (ctx.notify) ctx.notify(icT('unreadable'), { level: 'warning', key: 'inline-complete-unreadable' }) } catch (e) { /* old host */ }
+}
+var icReady = !ctx.loadData ? Promise.resolve() : Promise.resolve()
+  .then(function () { return ctx.loadData() })
+  .then(function (v) { icApplySettings(v) })
+  .catch(function (e) {
+    if (!icDataUnreadable(e)) return
+    icBlocked = true
+    icSettings.enabled = false
+    console.warn('[inline-complete] saved settings could not be read; inline completion is paused', e)
+    icWarnUnreadable()
+  })
+  // Always settle: if this never ran, changes queued behind the read would never land and nothing would be suggested.
+  .then(function () { icLoaded = true; icFireSettings() }, function () { icLoaded = true; icFireSettings() })
+/** Run now if the settings are in; otherwise once they are (a change made earlier would be wiped by the read, or would
+ *  write the defaults plus that one change over the saved settings). */
+function icWhenLoaded(fn) { if (icLoaded) fn(); else icReady.then(fn) }
 function icApplySettings(v) {
   if (!v || typeof v !== 'object') return
   if (typeof v.enabled === 'boolean') icSettings.enabled = v.enabled
   if (IC_CORE.STRENGTHS.indexOf(v.strength) >= 0) icSettings.strength = v.strength
-  if (v.pause === 'auto' || IC_CORE.PAUSES.indexOf(Number(v.pause)) >= 0) icSettings.pause = v.pause === 'auto' ? 'auto' : String(Number(v.pause))
+  var p = v.pause
+  if (p === 'auto' || ((typeof p === 'string' || typeof p === 'number') && IC_CORE.PAUSES.indexOf(Number(p)) >= 0)) icSettings.pause = p === 'auto' ? 'auto' : String(Number(p))
 }
+/** Apply and save a settings change. false = not applied (unreadable: refused; or deferred until the read lands). */
 function icSaveSettings(patch) {
+  if (!icLoaded) { icReady.then(function () { icSaveSettings(patch) }); return false }
+  if (icBlocked) {
+    icWarnUnreadable()
+    icFireSettings() // redraw, so a switch the user just flipped goes back
+    return false
+  }
   icApplySettings(patch)
   try { if (ctx.saveData) ctx.saveData({ enabled: icSettings.enabled, strength: icSettings.strength, pause: icSettings.pause }) } catch (e) { /* host without storage */ }
-  icSettingsListeners.forEach(function (f) { try { f() } catch (e) { /* listener */ } })
-}
-if (ctx.loadData) {
-  Promise.resolve().then(function () { return ctx.loadData() }).then(function (v) { icApplySettings(v); icSettingsListeners.forEach(function (f) { try { f() } catch (e) { /* listener */ } }) }, function () {})
+  icFireSettings()
+  return true
 }
 function icPauseMs() { return IC_CORE.pauseFor(icSettings.strength, icSettings.pause) }
 
@@ -233,7 +269,7 @@ function icFacts(view) {
   var marks = (st.storedMarks || $h.marks()).map(function (m) { return m.type.name })
   var parent = $h.parent
   return {
-    enabled: icSettings.enabled && icCanSuggest(),
+    enabled: icLoaded && icSettings.enabled && icCanSuggest(),
     focused: view.hasFocus(),
     editable: view.editable,
     composing: view.composing,
@@ -312,7 +348,8 @@ if (typeof ctx.registerEditorExtension === 'function') {
 
     function schedule(view) {
       cancelPending()
-      if (!icSettings.enabled || !icCanSuggest()) return
+      // Not before the saved settings are in: someone who turned it off must not get a request in that window.
+      if (!icLoaded || !icSettings.enabled || !icCanSuggest()) return
       ctl.timer = setTimeout(function () { ctl.timer = 0; fire(view) }, icPauseMs())
     }
     function fire(view) {
@@ -457,8 +494,10 @@ ctx.registerCommand({
   keywords: 'inline completion autocomplete ghost copilot 行内补全 自动补全 续写 hnbq',
   checked: function () { return icSettings.enabled },
   run: function () {
-    icSaveSettings({ enabled: !icSettings.enabled })
-    icNotify(icT(icSettings.enabled ? 'toast.on' : 'toast.off'))
+    icWhenLoaded(function () {
+      if (!icSaveSettings({ enabled: !icSettings.enabled })) return
+      icNotify(icT(icSettings.enabled ? 'toast.on' : 'toast.off'))
+    })
   },
 })
 ctx.registerCommand({
@@ -466,17 +505,19 @@ ctx.registerCommand({
   title: function () { return icT('cmd.cycle') },
   keywords: 'inline completion length short medium long 行内补全 长度 短 中 长',
   run: function () {
-    var list = IC_CORE.STRENGTHS
-    var next = list[(list.indexOf(icSettings.strength) + 1) % list.length]
-    icSaveSettings({ strength: next })
-    icNotify(icT('toast.strength', { name: icT('strength.' + next) }))
+    icWhenLoaded(function () {
+      var list = IC_CORE.STRENGTHS
+      var next = list[(list.indexOf(icSettings.strength) + 1) % list.length]
+      if (!icSaveSettings({ strength: next })) return
+      icNotify(icT('toast.strength', { name: icT('strength.' + next) }))
+    })
   },
 })
 
 // ── Settings page ─────────────────────────────────────────────────────────────────────────────
 function icSettingsSchema() {
   var items = [
-    { id: 'enabled', type: 'switch', title: icT('set.enabled'), value: icSettings.enabled, onChange: function (v) { icSaveSettings({ enabled: !!v }) } },
+    { id: 'enabled', type: 'switch', title: icT('set.enabled'), value: icSettings.enabled, disabled: icBlocked, onChange: function (v) { icSaveSettings({ enabled: !!v }) } },
     {
       id: 'strength', type: 'segmented', title: icT('set.strength'), desc: icT('set.strengthDesc') + ' ' + icT('strength.' + icSettings.strength + '.detail'),
       value: icSettings.strength, disabled: !icSettings.enabled,
@@ -489,6 +530,7 @@ function icSettingsSchema() {
       onChange: function (v) { icSaveSettings({ pause: v }) },
     },
   ]
+  if (icBlocked) items.unshift({ id: 'unreadable', type: 'state', state: { kind: 'empty', icon: 'warning', title: icT('unreadable') } })
   if (!icCanSuggest()) items.push({ id: 'na', type: 'state', state: { kind: 'empty', title: icT('set.unavailable') } })
   return { groups: [{ id: 'main', title: icT('set.group'), desc: icT('set.groupDesc') + ' ' + icT('set.modelDesc'), items: items }] }
 }
@@ -503,12 +545,17 @@ function icPlainSettings(el) {
     var s = document.createElement('span'); s.textContent = label
     r.appendChild(s); r.appendChild(control); box.appendChild(r)
   }
-  var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = icSettings.enabled
+  if (icBlocked) {
+    var bad = document.createElement('div'); bad.style.color = 'var(--text-muted)'; bad.textContent = icT('unreadable')
+    box.appendChild(bad)
+  }
+  var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = icSettings.enabled; cb.disabled = icBlocked
   cb.addEventListener('change', function () { icSaveSettings({ enabled: cb.checked }) })
   row(icT('set.enabled'), cb)
   function select(values, cur, labelOf, onPick) {
     var s = document.createElement('select')
     values.forEach(function (v) { var o = document.createElement('option'); o.value = v; o.textContent = labelOf(v); if (v === cur) o.selected = true; s.appendChild(o) })
+    s.disabled = icBlocked
     s.addEventListener('change', function () { onPick(s.value) })
     return s
   }
