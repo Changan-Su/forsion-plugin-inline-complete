@@ -319,14 +319,16 @@ function icWarnUnreadable() {
 }
 var icReady = !ctx.loadData ? Promise.resolve() : Promise.resolve()
   .then(function () { return ctx.loadData() })
-  .then(function (v) { icApplySettings(v) }, function (e) {
+  .then(function (v) { icApplySettings(v) })
+  .catch(function (e) {
     if (!icDataUnreadable(e)) return
     icBlocked = true
     icSettings.enabled = false
     console.warn('[inline-complete] saved settings could not be read; inline completion is paused', e)
     icWarnUnreadable()
   })
-  .then(function () { icLoaded = true; icFireSettings() })
+  // Always settle: if this never ran, changes queued behind the read would never land and nothing would be suggested.
+  .then(function () { icLoaded = true; icFireSettings() }, function () { icLoaded = true; icFireSettings() })
 /** Run now if the settings are in; otherwise once they are (a change made earlier would be wiped by the read, or would
  *  write the defaults plus that one change over the saved settings). */
 function icWhenLoaded(fn) { if (icLoaded) fn(); else icReady.then(fn) }
@@ -334,7 +336,8 @@ function icApplySettings(v) {
   if (!v || typeof v !== 'object') return
   if (typeof v.enabled === 'boolean') icSettings.enabled = v.enabled
   if (IC_CORE.STRENGTHS.indexOf(v.strength) >= 0) icSettings.strength = v.strength
-  if (v.pause === 'auto' || IC_CORE.PAUSES.indexOf(Number(v.pause)) >= 0) icSettings.pause = v.pause === 'auto' ? 'auto' : String(Number(v.pause))
+  var p = v.pause
+  if (p === 'auto' || ((typeof p === 'string' || typeof p === 'number') && IC_CORE.PAUSES.indexOf(Number(p)) >= 0)) icSettings.pause = p === 'auto' ? 'auto' : String(Number(p))
 }
 /** Apply and save a settings change. false = not applied (unreadable: refused; or deferred until the read lands). */
 function icSaveSettings(patch) {

@@ -173,6 +173,9 @@ for (const k of Object.keys(MSG.en)) {
   const unreadable = () => Object.assign(new Error('plugin-data-unreadable'), { code: 'plugin-data-unreadable', reason: 'invalid-json' })
   const realWarn = console.warn
   console.warn = () => {}
+  let unhandled = 0
+  const onUnhandled = () => { unhandled++ }
+  process.on('unhandledRejection', onUnhandled)
   function boot({ locale = 'zh', loadData } = {}) {
     let spec = null
     const pm = {
@@ -232,10 +235,13 @@ for (const k of Object.keys(MSG.en)) {
     g.views[0]?.mount?.({})
     ok('unreadable: settings page shows the notice', /读不出已保存/.test(g.item('unreadable')?.state?.title ?? ''), JSON.stringify(g.pages.at(-1)))
     ok('unreadable: settings switch shows off and is disabled', g.item('enabled')?.value === false && g.item('enabled')?.disabled === true)
+    ok('unreadable: settings page items have change handlers', typeof g.item('enabled')?.onChange === 'function' && typeof g.item('pause')?.onChange === 'function')
+    const pagesBefore = g.pages.length
     g.item('enabled')?.onChange?.(true)
     g.item('pause')?.onChange?.('500')
     await settle()
     ok('unreadable: settings page changes save nothing', g.saves.length === 0, JSON.stringify(g.saves))
+    ok('unreadable: refused settings changes redraw the page', g.pages.length > pagesBefore)
     ok('unreadable: switch redrawn as off after the refused change', g.item('enabled')?.value === false)
     ok('unreadable: still no model request after the attempts', g.typeOnce() === 0 && g.modelCalls === 0)
   }
@@ -255,7 +261,21 @@ for (const k of Object.keys(MSG.en)) {
     g.cmd('toggle')?.run()
     await settle()
     ok('null: toggle saves', g.saves.length === 1 && g.saves[0].enabled === false, JSON.stringify(g.saves))
+    g.views[0]?.mount?.({})
+    g.item('pause')?.onChange?.('500')
+    await settle()
+    ok('null: settings page change saves (the probe used above can see a save)', g.saves.length === 2 && g.saves[1].pause === '500', JSON.stringify(g.saves))
     ok('null: no warning', g.warnings().length === 0, JSON.stringify(g.notes))
+  }
+  // 4b. Valid JSON with a strange value must not wedge startup: changes still save afterwards.
+  {
+    const before = unhandled
+    const g = boot({ loadData: async () => ({ enabled: false, pause: { toString: 'x' } }) })
+    await settle()
+    g.cmd('cycle-strength')?.run()
+    await settle()
+    ok('odd value: no unhandled rejection', unhandled === before)
+    ok('odd value: startup settles and saving works', g.saves.length === 1 && g.saves[0].enabled === false, JSON.stringify(g.saves))
   }
   // 4. Any other rejection keeps the old behaviour: defaults, saving works, no notice.
   {
@@ -280,6 +300,7 @@ for (const k of Object.keys(MSG.en)) {
     ok('pending read: saved = original + the change', g.saves.length === 1 && JSON.stringify(g.saves[0]) === JSON.stringify({ enabled: false, strength: 'medium', pause: '500' }), JSON.stringify(g.saves))
   }
   console.warn = realWarn
+  process.off('unhandledRejection', onUnhandled)
   console.log(`unreadable-data checks: ${pass}/${pass + bad.length} passed`)
   for (const b of bad) console.log(`  FAIL ${b}`)
   assert.equal(bad.length, 0, 'unreadable-data checks failed')
